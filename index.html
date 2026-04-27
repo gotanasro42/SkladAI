@@ -179,7 +179,7 @@ const DEFAULT_SUPS=[{name:"APOZ tlač",email:"tatiana@takoy.sk",lead_days:25,lan
 // Stav aplikácie
 const S={
   tab:'upload',products:[],suppliers:[],ordered:[],snapshots:[],lastSync:null,
-  files:{sklad:null,pohyby:null,mag:null,hist:null},
+  files:{tovar:null,vyrobok:null,material:null,pohyby:null,mag:null,hist:null},
   processing:false,progress:0,pmsg:'',alert:null,
   filter:'all',search:'',supFil:'all',abcFil:'all',
   sortCol:'daysLeft',sortDir:1,
@@ -188,6 +188,7 @@ const S={
   supSearch:'',editLeadId:null,editLeadVal:'',
   dbOk:false,
   orderMonths:1.5,     // globálna zásoba v mesiacoch
+  page:0,              // aktuálna stránka (50 produktov)
   typFil:'all',        // filter typu produktu
   objFil:'all',        // filter Magento stavu
   rowMonths:{},        // per-produkt override: {sku: months}
@@ -402,9 +403,8 @@ async function processAll(){
   S.processing=true;S.progress=5;S.pmsg='Načítavam stav skladu...';render();
   try{
     const sklR=await parseFile(S.files.sklad);
-    // Debug: log prvý riadok stavu skladu do konzoly
-    if(sklR.length>0){console.log('Stav skladu — stĺpce:',Object.keys(sklR[0]));console.log('Prvý produkt:',sklR[0]);}
-    S.progress=22;S.pmsg='Načítavam pohyby (20–30 sek)...';render();
+
+    S.progress=30;S.pmsg='Načítavam pohyby skladu (20–30 sek)...';render();
     const pohR=await parseFile(S.files.pohyby);S.progress=55;S.pmsg='Načítavam Magento export...';render();
     const magR=await parseFile(S.files.mag);S.progress=72;
     // Pohyby 2025 — spracuj ak nahrané, inak použi uložené v DB
@@ -442,7 +442,7 @@ async function processAll(){
     S.snapshots=S.snapshots.filter(s=>s.date!==date);S.snapshots.unshift({date,stats});
     S.products=products;S.lastSync=date;S.progress=100;S.processing=false;
     const sfPct=Math.round((seasonalFactor(Math.round(S.orderMonths*30))-1)*100);
-    S.alert={t:'ok',msg:`Hotovo! Produkty: ${sklR.length.toLocaleString()}, pohyby: ${pohR.length.toLocaleString()}, vylúčených inventúrnych: ${invSkipped}. Kritických: ${stats.vypadok+stats.urgentne+stats.kriticke}. Sezónny koef.: ${sfPct>0?'+':''}${sfPct}%.`};
+    S.alert={t:'ok',msg:`Hotovo! Produkty: ${sklR.length.toLocaleString()} (T:${sklTovar.length}/V:${sklVyrobok.length}/M:${sklMaterial.length}), pohyby: ${pohR.length.toLocaleString()}, vylúčených inventúrnych: ${invSkipped}. Kritických: ${stats.vypadok+stats.urgentne+stats.kriticke}. Sezónny koef.: ${sfPct>0?'+':''}${sfPct}%.`};
     S.tab='dashboard';
   }catch(err){S.processing=false;S.alert={t:'e',msg:'Chyba: '+err.message};console.error(err);}
   render();
@@ -535,7 +535,15 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
   ${sups.length?`<select id="supfil" style="font-size:11px;padding:5px 7px;"><option value="all">Všetci dodávatelia</option>${sups.map(s=>`<option value="${esc(s)}"${S.supFil===s?' selected':''}>${esc(s)}</option>`).join('')}</select>`:''}
 </div>
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-  <span style="font-size:10px;color:#AAA">Zobrazených ${Math.min(filtered.length,500)} z ${filtered.length} · celkom v DB: ${S.products.length} produktov${S.typFil!=='all'||S.objFil!=='all'||S.filter!=='all'||S.search?' · filtrované':' · len kritické (klikni na typ pre všetky)'}</span>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span style="font-size:10px;color:#AAA">Celkom: ${filtered.length} produktov (${S.products.length} v DB)${S.typFil!=='all'||S.objFil!=='all'||S.filter!=='all'||S.search?' · filtrované':' · len kritické'}</span>
+    ${filtered.length>50?`<div style="display:flex;align-items:center;gap:4px;margin-left:auto">
+      <button id="pg-prev" class="dbtn" ${S.page===0?'disabled':''}>← Predch.</button>
+      <span style="font-size:11px;font-weight:500;padding:0 6px">${S.page+1} / ${Math.ceil(filtered.length/50)}</span>
+      <button id="pg-next" class="dbtn" ${(S.page+1)*50>=filtered.length?'disabled':''}>Ďalšia →</button>
+      <span style="font-size:10px;color:#AAA">(${S.page*50+1}–${Math.min((S.page+1)*50,filtered.length)})</span>
+    </div>`:''}
+  </div>
   <div style="display:flex;align-items:center;gap:5px;margin-left:auto;background:#F9F9F9;border:1px solid #E5E5E5;border-radius:6px;padding:3px 9px">
     <span style="font-size:10px;color:#666;font-weight:500">Globálna zásoba:</span>
     ${[0.5,1,1.5,2,3,6].map(m=>`<button class="pill${S.orderMonths===m?' on':''}" data-months="${m}" style="font-size:10px;padding:2px 6px">${m<1?Math.round(m*30)+'d':m+'m'}</button>`).join('')}
@@ -563,7 +571,7 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
   <th>Stav</th>
   <th>Akcia</th>
 </tr></thead>
-<tbody>${filtered.slice(0,500).map(p=>{
+<tbody>${filtered.slice(S.page*50,(S.page+1)*50).map(p=>{
   const ord=isOrd(p.sku);
   const dc=p.status==='vypadok'?'#A32D2D':p.status==='urgentne'?'#7A1C1C':p.status==='kriticke'?'#854F0B':'#27500A';
   const smap={vypadok:['sv','Výpadok'],urgentne:['su','Urgentné'],kriticke:['sk2','Kritické'],varovanie:['sw','Varovanie']};
@@ -644,20 +652,24 @@ function uploadHtml(){
   ${dz('mag','3. Magento export','SKU + Objednanie + Dodávateľ',f.mag,false)}
   ${dz('hist',S.has2025?'4. Pohyby 2025 (aktualizovať)':'4. Pohyby 2025 (nahraj raz)','FlexiBee — celý rok 2025 — uloží sa do DB',f.hist,true)}
 </div>
-${S.processing?`<div style="font-size:12px;color:#666;margin-bottom:5px">${S.pmsg}</div><div class="pw"><div class="pb" style="width:${S.progress}%"></div></div>`:`<button class="pbtn" id="proc-btn" ${(!f.sklad||!f.pohyby||!f.mag)?'disabled':''}>Spracovať a uložiť do databázy</button>`}
+${S.processing?`<div style="font-size:12px;color:#666;margin-bottom:5px">${S.pmsg}</div><div class="pw"><div class="pb" style="width:${S.progress}%"></div></div>`:`<button class="pbtn" id="proc-btn" ${((!f.tovar&&!f.vyrobok&&!f.material)||!f.pohyby||!f.mag)?'disabled':''}>Spracovať a uložiť do databázy</button>`}
 </div>
 <div class="panel">
 <div class="ptitle">Čo musia súbory obsahovať</div>
 <div class="guide-grid">
 <div class="guide-card">
-  <div class="guide-head fb">📊 FlexiBee — Stav skladu</div>
+  <div class="guide-head fb">📊 FlexiBee — Stav skladu (3× zvlášť)</div>
   <div class="guide-body">
-    <div class="guide-freq">Každý deň: Sklady → Stav skladu k dátumu → Export Excel</div>
+    <div class="guide-freq">Každý deň: Sklady → Stav skladu k dátumu → filter Skupina tovarov → Export Excel</div>
+    <div style="font-size:10px;background:#F9F9F9;border-radius:4px;padding:4px 7px;margin-bottom:6px">
+      Export 3× pre: <strong>TOVAR</strong> · <strong>VYROBOK</strong> · <strong>MATERIAL</strong>
+    </div>
     <div class="guide-col"><span class="gcn">Cenník</span><span class="req">!</span><span class="gcd">kód produktu</span></div>
     <div class="guide-col"><span class="gcn">Názov</span><span class="req">!</span></div>
-    <div class="guide-col"><span class="gcn">Stav zásob v MJ</span><span class="req">!</span><span class="gcd">množstvo</span></div>
+    <div class="guide-col"><span class="gcn">Stav zásob v MJ</span><span class="req">!</span><span class="gcd">množstvo na sklade</span></div>
     <div class="guide-col"><span class="gcn">Priem. cena</span><span class="req">!</span></div>
     <div class="guide-col"><span class="gcn">MJ</span><span class="req">!</span><span class="gcd">m / ks / kg</span></div>
+    <div class="guide-col"><span class="gcn">Skupina tovarov</span><span class="opt-b">vol.</span><span class="gcd">auto-detekcia z názvu súboru</span></div>
   </div>
 </div>
 <div class="guide-card">
@@ -761,20 +773,23 @@ ${S.snapshots.map((s,i)=>{
 function bindAll(){
   const q=s=>document.querySelector(s),qa=s=>document.querySelectorAll(s);
   qa('[data-tab]').forEach(el=>el.addEventListener('click',()=>{S.tab=el.dataset.tab;S.alert=null;render();}));
-  qa('[data-fil]').forEach(el=>el.addEventListener('click',()=>{S.filter=el.dataset.fil;render();}));
+  qa('[data-fil]').forEach(el=>el.addEventListener('click',()=>{S.filter=el.dataset.fil;resetPage();render();}));
+  function resetPage(){S.page=0;}
   qa('[data-typ]').forEach(el=>el.addEventListener('click',()=>{
     S.typFil=el.dataset.typ;
     // Keď vyberieš typ, resetni status filter aby si videl všetky daného typu
     if(S.typFil!=='all') S.filter='all';
-    render();
+    resetPage();render();
   }));
-  qa('[data-obj]').forEach(el=>el.addEventListener('click',()=>{S.objFil=S.objFil===el.dataset.obj?'all':el.dataset.obj;render();}));
-  qa('[data-abc]').forEach(el=>el.addEventListener('click',()=>{S.abcFil=S.abcFil===el.dataset.abc?'all':el.dataset.abc;render();}));
+  qa('[data-obj]').forEach(el=>el.addEventListener('click',()=>{S.objFil=S.objFil===el.dataset.obj?'all':el.dataset.obj;resetPage();render();}));
+  qa('[data-abc]').forEach(el=>el.addEventListener('click',()=>{S.abcFil=S.abcFil===el.dataset.abc?'all':el.dataset.abc;resetPage();render();}));
   qa('[data-months]').forEach(el=>el.addEventListener('click',()=>{S.orderMonths=+el.dataset.months;render();}));
+  const pgp=q('#pg-prev');if(pgp)pgp.addEventListener('click',()=>{if(S.page>0){S.page--;render();window.scrollTo(0,0);}});
+  const pgn=q('#pg-next');if(pgn)pgn.addEventListener('click',()=>{S.page++;render();window.scrollTo(0,0);});
   qa('[data-sort]').forEach(el=>el.addEventListener('click',()=>{const c=el.dataset.sort;S.sortCol===c?S.sortDir*=-1:(S.sortCol=c,S.sortDir=1);render();}));
   qa('[data-dz]').forEach(el=>el.addEventListener('change',e=>{const f=e.target.files[0];if(f)S.files[el.dataset.dz]=f;render();}));
   qa('[data-rowm]').forEach(el=>el.addEventListener('change',e=>{S.rowMonths[el.dataset.rowm]=+e.target.value||S.orderMonths;render();}));
-  const si=q('#srch');if(si)si.addEventListener('input',e=>{S.search=e.target.value;render();});
+  const si=q('#srch');if(si)si.addEventListener('input',e=>{S.search=e.target.value;resetPage();render();});
   const sf2=q('#supfil');if(sf2)sf2.addEventListener('change',e=>{S.supFil=e.target.value;render();});
   const pb=q('#proc-btn');if(pb)pb.addEventListener('click',()=>{if(!S.processing)processAll();});
   const alx=q('#al-x');if(alx)alx.addEventListener('click',()=>{S.alert=null;render();});
