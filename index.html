@@ -402,17 +402,35 @@ function orderQtyFor(p,months){
 async function processAll(){
   S.processing=true;S.progress=5;S.pmsg='Načítavam stav skladu...';render();
   try{
-    const sklR=await parseFile(S.files.sklad);
+    // ── 1. Stav skladu — 3 separátne súbory ──
+    S.pmsg='Načítavam Tovar...';render();
+    const sklTovar   = S.files.tovar    ? await parseFile(S.files.tovar)    : [];
+    S.pmsg='Načítavam Výrobok...';render();
+    const sklVyrobok = S.files.vyrobok  ? await parseFile(S.files.vyrobok)  : [];
+    S.pmsg='Načítavam Materiál...';render();
+    const sklMaterial= S.files.material ? await parseFile(S.files.material) : [];
+    sklTovar.forEach(r=>{r.__typ='Tovar';});
+    sklVyrobok.forEach(r=>{r.__typ='Výrobok';});
+    sklMaterial.forEach(r=>{r.__typ='Materiál';});
+    const sklR=[...sklTovar,...sklVyrobok,...sklMaterial];
+    console.log(`Sklad načítaný: T=${sklTovar.length}, V=${sklVyrobok.length}, M=${sklMaterial.length}, spolu=${sklR.length}`);
+    if(sklR.length>0)console.log('Prvý riadok:',sklR[0],'Stĺpce:',Object.keys(sklR[0]).filter(k=>!k.startsWith('__')));
 
-    S.progress=30;S.pmsg='Načítavam pohyby skladu (20–30 sek)...';render();
-    const pohR=await parseFile(S.files.pohyby);S.progress=55;S.pmsg='Načítavam Magento export...';render();
-    const magR=await parseFile(S.files.mag);S.progress=72;
-    // Pohyby 2025 — spracuj ak nahrané, inak použi uložené v DB
+    // ── 2. Pohyby skladu ──
+    S.progress=25;S.pmsg='Načítavam pohyby skladu (môže trvať 20–30 sek)...';render();
+    const pohR = S.files.pohyby ? await parseFile(S.files.pohyby) : [];
+
+    // ── 3. Magento export ──
+    S.progress=55;S.pmsg='Načítavam Magento export...';render();
+    const magR = S.files.mag ? await parseFile(S.files.mag) : [];
+
+    S.progress=70;
+
+    // ── 4. Pohyby 2025 ──
     let sal2025=S.sal2025||{};
     if(S.files.hist){
       S.pmsg='Načítavam pohyby 2025 a ukladám do DB...';render();
       const pohR2025=await parseFile(S.files.hist);
-      // Vypočítaj sal2025 objekt
       const yr=new Date();yr.setFullYear(yr.getFullYear()-1);
       const lo=yr.getTime()-15*864e5,hi=yr.getTime()+15*864e5;
       const sal2025new={};
@@ -428,11 +446,11 @@ async function processAll(){
         sal2025new[sku]+=qty;
       }
       for(const sku of Object.keys(sal2025new))sal2025new[sku]=+(sal2025new[sku]/30).toFixed(2);
-      sal2025=sal2025new;
-      S.sal2025=sal2025;
-      S.has2025=true;
+      sal2025=sal2025new;S.sal2025=sal2025;S.has2025=true;
       await dbSaveHist2025(sal2025);
     }
+
+    // ── 5. Výpočet ──
     S.pmsg='Vyhodnocujem...';render();
     const{products,invSkipped}=compute(sklR,pohR,magR,S.suppliers,sal2025);
     S.progress=88;S.pmsg='Ukladám do databázy...';render();
@@ -442,7 +460,7 @@ async function processAll(){
     S.snapshots=S.snapshots.filter(s=>s.date!==date);S.snapshots.unshift({date,stats});
     S.products=products;S.lastSync=date;S.progress=100;S.processing=false;
     const sfPct=Math.round((seasonalFactor(Math.round(S.orderMonths*30))-1)*100);
-    S.alert={t:'ok',msg:`Hotovo! Produkty: ${sklR.length.toLocaleString()} (T:${sklTovar.length}/V:${sklVyrobok.length}/M:${sklMaterial.length}), pohyby: ${pohR.length.toLocaleString()}, vylúčených inventúrnych: ${invSkipped}. Kritických: ${stats.vypadok+stats.urgentne+stats.kriticke}. Sezónny koef.: ${sfPct>0?'+':''}${sfPct}%.`};
+    S.alert={t:'ok',msg:`Hotovo! T:${sklTovar.length} V:${sklVyrobok.length} M:${sklMaterial.length} produktov, pohyby: ${pohR.length.toLocaleString()}, inventúra vylúčená: ${invSkipped}. Kritických: ${stats.vypadok+stats.urgentne+stats.kriticke}. Sezónny koef.: ${sfPct>0?'+':''}${sfPct}%.`};
     S.tab='dashboard';
   }catch(err){S.processing=false;S.alert={t:'e',msg:'Chyba: '+err.message};console.error(err);}
   render();
