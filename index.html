@@ -188,6 +188,7 @@ const S={
   supSearch:'',editLeadId:null,editLeadVal:'',
   dbOk:false,
   orderMonths:1.5,     // globálna zásoba v mesiacoch
+  typFil:'all',        // filter typu produktu
   rowMonths:{},        // per-produkt override: {sku: months}
   has2025:false,       // či máme nahrané hist. pohyby
 };
@@ -238,7 +239,9 @@ async function parseFile(file){
 function compute(sklR,pohR,magR,sups,pohR2025){
   const now=Date.now(),ms14=now-14*864e5,ms45=now-45*864e5,ms90=now-90*864e5;
   const sk={};
-  for(const r of sklR){const sku=r['Cenník']||'';if(!sku)continue;sk[sku]={name:r['Názov']||'',stock:+r['Stav zásob v MJ']||0,price:+r['Priem. cena']||0,mj:r['MJ']||'',skupina:r['Skupina tovarov']||''};}
+  for(const r of sklR){const sku=r['Cenník']||'';if(!sku)continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
+    const typ=sg==='VYROBOK'?'Výrobok':sg==='MATERIAL'||sg==='POUZITY_MATERIAL'?'Materiál':'Tovar';
+    sk[sku]={name:r['Názov']||'',stock:+r['Stav zásob v MJ']||0,price:+r['Priem. cena']||0,mj:r['MJ']||'',skupina:sg,typ};}
 
   const sal={},invSkipped=[];
   for(const r of pohR){
@@ -275,7 +278,8 @@ function compute(sklR,pohR,magR,sups,pohR2025){
   }
 
   const mag={};
-  for(const r of magR){const sku=r['SKU']||'';if(!sku)continue;mag[sku]={obj:r['Objednanie']||'',sup:resolveSupplier((r['Dodávateľ']||r['Dodavatel']||'').trim()),email:r['Email']||''};}
+  for(const r of magR){const sku=r['SKU']||'';if(!sku)continue;const magTyp=(r['Typ produktu']||r['Typ']||'').toString().trim();
+    mag[sku]={obj:r['Objednanie']||'',sup:resolveSupplier((r['Dodávateľ']||r['Dodavatel']||'').trim()),email:r['Email']||'',magTyp};}
   const supMap={};for(const s of sups)supMap[(s.name||'').toLowerCase().trim()]=s;
 
   // ABC klasifikácia — zorad podľa v45, top 20% = A, 50% = B, zvyšok = C
@@ -323,7 +327,7 @@ function compute(sklR,pohR,magR,sups,pohR2025){
       d14:+d14.toFixed(2),d45:+d45.toFixed(2),d90:+d90.toFixed(2),dPY,
       v14:+sa.v14.toFixed(2),v45:+sa.v45.toFixed(2),v90:+sa.v90.toFixed(2),
       daysLeft:daysLeft>=9999?null:+daysLeft.toFixed(1),
-      status,obj:m.obj||'nenastavené',
+      status,obj:m.obj||'nenastavené',typ:m.magTyp||s.typ||'Tovar',
       dodavatel:m.sup||'',leadDays,email,lang:supI?supI.lang:'SK',
       subject:supI?supI.subject:'Objednávka',rolky:supI?supI.rolky:'Nie',
       toolate,trend,tCls,tTip,abc});
@@ -365,12 +369,21 @@ function getFiltered(){
   if(S.filter==='neskoro')p=p.filter(x=>x.toolate);
   else if(S.filter!=='all')p=p.filter(x=>x.status===S.filter);
   if(S.supFil!=='all')p=p.filter(x=>x.dodavatel===S.supFil);
+  if(S.typFil!=='all')p=p.filter(x=>x.typ===S.typFil);
   if(S.abcFil!=='all')p=p.filter(x=>x.abc===S.abcFil);
   if(S.search){const q=S.search.toLowerCase();p=p.filter(x=>x.sku.toLowerCase().includes(q)||x.name.toLowerCase().includes(q)||(x.dodavatel||'').toLowerCase().includes(q));}
   return[...p].sort((a,b)=>{const c=S.sortCol;let av=a[c]??99999,bv=b[c]??99999;return typeof av==='string'?S.sortDir*av.localeCompare(bv):S.sortDir*(av-bv);});
 }
 function isOrd(sku){return S.ordered.some(o=>o.sku===sku&&!o.arrived);}
 function render(){document.getElementById('app').innerHTML=buildHtml();bindAll();}
+function typBadge(typ){
+  const map={
+    'Tovar':'<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#F9F9F9;color:#444;font-weight:500">📦 Tovar</span>',
+    'Výrobok':'<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#EEEDFE;color:#3C3489;font-weight:500">🔧 Výrobok</span>',
+    'Materiál':'<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#FEF0DC;color:#5C3308;font-weight:500">🧵 Materiál</span>',
+  };
+  return map[typ]||`<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#F9F9F9;color:#888">${esc(typ||'?')}</span>`;
+}
 function th(col,label,tip=''){const a=S.sortCol===col;return `<th data-sort="${col}"${tip?` title="${tip}"`:''} style="cursor:pointer">${label}${tip?' ⓘ':''}${a?(S.sortDir===1?' ▲':' ▼'):''}</th>`;}
 
 function buildHtml(){
@@ -451,6 +464,7 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
   ${th('dodavatel','Dodávateľ')}
   ${th('trend','Trend','Predaj/deň (14d) vs priemer (90d). Hover pre detail.')}
   <th title="ABC: A=top 70% tržieb, B=ďalších 25%, C=zvyšok">ABC</th>
+  <th title="Typ produktu: Tovar / Výrobok / Materiál (z FlexiBee Skupina tovarov alebo Magento)">Typ</th>
   <th title="Stav objednávania z Magento (ano/predobjednané/sezóna/...)">Mag.stav</th>
   <th>Stav</th>
   <th>Akcia</th>
@@ -481,6 +495,7 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
     <td style="font-size:10px">${esc(p.dodavatel)||'—'}</td>
     <td class="${p.tCls}" title="${esc(p.tTip)}">${p.trend}</td>
     <td>${abcBadge(p.abc)}</td>
+    <td>${typBadge(p.typ)}</td>
     <td>${objBadge(p.obj)}</td>
     <td><span class="sb ${sc}">${sl}</span>${nt}</td>
     <td><button class="bo${ord?' done':''}" data-order="${esc(p.sku)}">${ord?'✓':'Objednať'}</button></td>
@@ -507,6 +522,7 @@ ${p.toolate?`<div style="font-size:11px;color:#854F0B;margin-bottom:7px;padding:
   ${p.dPY!==null&&p.dPY!==undefined?`<span>Vlani rovn.obd.: <strong>${p.dPY} ${p.mj}/d</strong></span>`:''}
   <span>Trend: <strong class="${p.tCls}">${p.trend}</strong></span>
   <span>Mag.stav: <strong>${p.obj}</strong></span>
+  <span>Typ: <strong>${p.typ}</strong></span>
   <span>ABC: <strong>${p.abc}</strong></span>
   <span>Zásoba nastavená: <strong>${rowM} mes. (${Math.round(rowM*30)} dní)</strong></span>
 </div>
@@ -652,6 +668,7 @@ function bindAll(){
   const q=s=>document.querySelector(s),qa=s=>document.querySelectorAll(s);
   qa('[data-tab]').forEach(el=>el.addEventListener('click',()=>{S.tab=el.dataset.tab;S.alert=null;render();}));
   qa('[data-fil]').forEach(el=>el.addEventListener('click',()=>{S.filter=el.dataset.fil;render();}));
+  qa('[data-typ]').forEach(el=>el.addEventListener('click',()=>{S.typFil=el.dataset.typ;render();}));
   qa('[data-abc]').forEach(el=>el.addEventListener('click',()=>{S.abcFil=S.abcFil===el.dataset.abc?'all':el.dataset.abc;render();}));
   qa('[data-months]').forEach(el=>el.addEventListener('click',()=>{S.orderMonths=+el.dataset.months;render();}));
   qa('[data-sort]').forEach(el=>el.addEventListener('click',()=>{const c=el.dataset.sort;S.sortCol===c?S.sortDir*=-1:(S.sortCol=c,S.sortDir=1);render();}));
