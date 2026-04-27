@@ -222,6 +222,9 @@ async function dbLoad(){
     if(hist&&Object.keys(hist).length>0){
       S.sal2025=hist;
       S.has2025=true;
+      console.log('Pohyby 2025 načítané z DB, produktov:',Object.keys(hist).length);
+    }else{
+      console.log('Pohyby 2025 nie sú v DB — nahraj 4. slot raz');
     }
   }catch(e){console.error(e);S.dbOk=false;S.alert={t:'e',msg:`Chyba DB: ${e.message}`};}
 }
@@ -240,18 +243,25 @@ async function dbSaveProducts(d,p){
 
 // Uloženie a načítanie pohybov 2025 z Supabase
 async function dbSaveHist2025(sal2025){
-  // Uložíme ako jeden JSON objekt
-  const{error}=await db.from('current_products').upsert(
-    {sync_date:'2025-hist',products:sal2025},
-    {onConflict:'sync_date'}
-  );
-  if(error)console.error('Hist2025 save error:',error);
-  else console.log('Pohyby 2025 uložené do DB');
+  try{
+    const{error}=await db.from('current_products').upsert(
+      {sync_date:'2025-hist',products:sal2025},
+      {onConflict:'sync_date'}
+    );
+    if(error){console.error('Hist2025 save error:',error);return false;}
+    console.log('Pohyby 2025 uložené do DB, produktov:',Object.keys(sal2025).length);
+    return true;
+  }catch(e){console.error('dbSaveHist2025 error:',e);return false;}
 }
 async function dbLoadHist2025(){
-  const{data,error}=await db.from('current_products').select('products').eq('sync_date','2025-hist').single();
-  if(error||!data)return null;
-  return data.products; // sal2025 object {sku: avgPerDay}
+  try{
+    const{data,error}=await db.from('current_products').select('products').eq('sync_date','2025-hist').limit(1);
+    if(error||!data||data.length===0)return null;
+    const p=data[0].products;
+    // Rozlíš: ak je to objekt {sku:avg}, vráť priamo; ak array (starý formát), ignoruj
+    if(p&&!Array.isArray(p)&&typeof p==='object')return p;
+    return null;
+  }catch(e){console.error('dbLoadHist2025 error:',e);return null;}
 }
 
 async function parseFile(file){
@@ -440,17 +450,21 @@ async function processAll(){
 
 function getFiltered(){
   let p=S.products;
-  if(S.filter==='neskoro')p=p.filter(x=>x.toolate);
-  else if(S.filter!=='all')p=p.filter(x=>x.status===S.filter);
-  if(S.supFil!=='all')p=p.filter(x=>x.dodavatel===S.supFil);
-  if(S.typFil!=='all')p=p.filter(x=>x.typ===S.typFil);
-  if(S.objFil!=='all')p=p.filter(x=>x.obj===S.objFil);
-  // Default: ak nie sú zapnuté žiadne špeciálne filtre, ukaž len kritické
-  const hasSpecialFilter=S.filter!=='all'||S.typFil!=='all'||S.objFil!=='all'||S.abcFil!=='all'||S.search;
-  if(!hasSpecialFilter)p=p.filter(x=>['vypadok','urgentne','kriticke','varovanie'].includes(x.status));
-  if(S.abcFil!=='all')p=p.filter(x=>x.abc===S.abcFil);
-  if(S.search){const q=S.search.toLowerCase();p=p.filter(x=>x.sku.toLowerCase().includes(q)||x.name.toLowerCase().includes(q)||(x.dodavatel||'').toLowerCase().includes(q));}
-  return[...p].sort((a,b)=>{const c=S.sortCol;let av=a[c]??99999,bv=b[c]??99999;return typeof av==='string'?S.sortDir*av.localeCompare(bv):S.sortDir*(av-bv);});
+  // Ak nie je aktívny žiadny filter okrem "všetky" — ukaž len kritické (default)
+  const anyFilterActive=S.filter!=='all'||S.typFil!=='all'||S.objFil!=='all'||S.abcFil!=='all'||!!S.search||S.supFil!=='all';
+  if(!anyFilterActive){
+    p=p.filter(x=>['vypadok','urgentne','kriticke','varovanie'].includes(x.status));
+  } else {
+    // Aplikuj vybrané filtre
+    if(S.filter==='neskoro') p=p.filter(x=>x.toolate);
+    else if(S.filter!=='all') p=p.filter(x=>x.status===S.filter);
+    if(S.typFil!=='all')  p=p.filter(x=>(x.typ||'Tovar')===S.typFil);
+    if(S.objFil!=='all')  p=p.filter(x=>x.obj===S.objFil);
+    if(S.abcFil!=='all')  p=p.filter(x=>x.abc===S.abcFil);
+    if(S.supFil!=='all')  p=p.filter(x=>x.dodavatel===S.supFil);
+    if(S.search){const q=S.search.toLowerCase();p=p.filter(x=>x.sku.toLowerCase().includes(q)||x.name.toLowerCase().includes(q)||(x.dodavatel||'').toLowerCase().includes(q));}
+  }
+  return[...p].sort((a,b)=>{const col=S.sortCol;let av=a[col]??99999,bv=b[col]??99999;return typeof av==='string'?S.sortDir*av.localeCompare(bv):S.sortDir*(av-bv);});
 }
 function isOrd(sku){return S.ordered.some(o=>o.sku===sku&&!o.arrived);}
 function render(){document.getElementById('app').innerHTML=buildHtml();bindAll();}
@@ -521,7 +535,7 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
   ${sups.length?`<select id="supfil" style="font-size:11px;padding:5px 7px;"><option value="all">Všetci dodávatelia</option>${sups.map(s=>`<option value="${esc(s)}"${S.supFil===s?' selected':''}>${esc(s)}</option>`).join('')}</select>`:''}
 </div>
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-  <span style="font-size:10px;color:#AAA">Zobrazených ${Math.min(filtered.length,500)} z ${filtered.length} (celkom: ${S.products.length}${(!S.filter||S.filter==='all')&&!S.typFil||S.typFil==='all'&&!S.objFil||S.objFil==='all'&&!S.search&&S.abcFil==='all'?' · len kritické':' · filtrované'})</span>
+  <span style="font-size:10px;color:#AAA">Zobrazených ${Math.min(filtered.length,500)} z ${filtered.length} · celkom v DB: ${S.products.length} produktov${S.typFil!=='all'||S.objFil!=='all'||S.filter!=='all'||S.search?' · filtrované':' · len kritické (klikni na typ pre všetky)'}</span>
   <div style="display:flex;align-items:center;gap:5px;margin-left:auto;background:#F9F9F9;border:1px solid #E5E5E5;border-radius:6px;padding:3px 9px">
     <span style="font-size:10px;color:#666;font-weight:500">Globálna zásoba:</span>
     ${[0.5,1,1.5,2,3,6].map(m=>`<button class="pill${S.orderMonths===m?' on':''}" data-months="${m}" style="font-size:10px;padding:2px 6px">${m<1?Math.round(m*30)+'d':m+'m'}</button>`).join('')}
@@ -748,7 +762,12 @@ function bindAll(){
   const q=s=>document.querySelector(s),qa=s=>document.querySelectorAll(s);
   qa('[data-tab]').forEach(el=>el.addEventListener('click',()=>{S.tab=el.dataset.tab;S.alert=null;render();}));
   qa('[data-fil]').forEach(el=>el.addEventListener('click',()=>{S.filter=el.dataset.fil;render();}));
-  qa('[data-typ]').forEach(el=>el.addEventListener('click',()=>{S.typFil=el.dataset.typ;render();}));
+  qa('[data-typ]').forEach(el=>el.addEventListener('click',()=>{
+    S.typFil=el.dataset.typ;
+    // Keď vyberieš typ, resetni status filter aby si videl všetky daného typu
+    if(S.typFil!=='all') S.filter='all';
+    render();
+  }));
   qa('[data-obj]').forEach(el=>el.addEventListener('click',()=>{S.objFil=S.objFil===el.dataset.obj?'all':el.dataset.obj;render();}));
   qa('[data-abc]').forEach(el=>el.addEventListener('click',()=>{S.abcFil=S.abcFil===el.dataset.abc?'all':el.dataset.abc;render();}));
   qa('[data-months]').forEach(el=>el.addEventListener('click',()=>{S.orderMonths=+el.dataset.months;render();}));
