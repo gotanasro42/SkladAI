@@ -189,6 +189,7 @@ const S={
   dbOk:false,
   orderMonths:1.5,     // globálna zásoba v mesiacoch
   typFil:'all',        // filter typu produktu
+  objFil:'all',        // filter Magento stavu
   rowMonths:{},        // per-produkt override: {sku: months}
   has2025:false,       // či máme nahrané hist. pohyby
   sal2025:{},          // {sku: avgPerDay} — uložené/načítané z DB
@@ -231,7 +232,11 @@ async function dbSaveOrder(ord){const{error}=await db.from('orders').upsert(ord)
 async function dbUpdateOrder(id,data){const{error}=await db.from('orders').update(data).eq('id',id);if(error)S.alert={t:'e',msg:'Chyba: '+error.message};}
 async function dbDeleteOrder(id){const{error}=await db.from('orders').delete().eq('id',id);if(error)S.alert={t:'e',msg:'Chyba: '+error.message};}
 async function dbSaveSnapshot(snap){await db.from('snapshots').upsert({date:snap.date,stats:snap.stats},{onConflict:'date'});}
-async function dbSaveProducts(d,p){await db.from('current_products').upsert({sync_date:d,products:p},{onConflict:'sync_date'});}
+async function dbSaveProducts(d,p){
+  // Ulož len kritické produkty do DB (šetrí miesto) — ostatné sa prepočítajú pri nahraní
+  const critical=p.filter(x=>['vypadok','urgentne','kriticke','varovanie'].includes(x.status));
+  await db.from('current_products').upsert({sync_date:d,products:p},{onConflict:'sync_date'});
+}
 
 // Uloženie a načítanie pohybov 2025 z Supabase
 async function dbSaveHist2025(sal2025){
@@ -257,16 +262,29 @@ async function parseFile(file){
   });
 }
 
-// Robustné čítanie stĺpca — hľadá podreťazec case-insensitívne
-function col(row,keywords){
+// Robustné čítanie stĺpca
+function normalize(s){return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();}
+function col(row,candidates){
+  // 1. Exact match
+  for(const c of (Array.isArray(candidates)?candidates:[candidates])){
+    if(row[c]!==undefined&&row[c]!==null&&row[c]!=='')return row[c];
+  }
+  // 2. Normalized match (strip diacritics + lowercase)
   const keys=Object.keys(row);
-  for(const kw of (Array.isArray(keywords)?keywords:[keywords])){
-    const k=keys.find(k=>k.toLowerCase().replace(/\s+/g,' ').trim().includes(kw.toLowerCase()));
-    if(k!==undefined&&row[k]!==''&&row[k]!==null&&row[k]!==undefined)return row[k];
+  for(const c of (Array.isArray(candidates)?candidates:[candidates])){
+    const nc=normalize(c);
+    const k=keys.find(k=>normalize(k)===nc);
+    if(k&&row[k]!==undefined&&row[k]!==null&&row[k]!=='')return row[k];
+  }
+  // 3. Contains match
+  for(const c of (Array.isArray(candidates)?candidates:[candidates])){
+    const nc=normalize(c);
+    const k=keys.find(k=>normalize(k).includes(nc));
+    if(k&&row[k]!==undefined&&row[k]!==null&&row[k]!=='')return row[k];
   }
   return undefined;
 }
-function num(row,keywords){return parseFloat(col(row,keywords))||0;}
+function num(row,candidates){const v=col(row,candidates);return v===undefined||v===null||v===''?0:parseFloat(String(v).replace(',','.'))||0;}
 
 // Hlavný výpočet
 // Vylúčenie inventúry: vydej BEZ Činnosti = inventúrny pohyb (overené na 100% vzorke)
@@ -276,10 +294,10 @@ function compute(sklR,pohR,magR,sups,sal2025ext){
   for(const r of sklR){const sku=col(r,['Cenník','cennik','Cennk'])||'';if(!sku)continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
     const typ=sg==='VYROBOK'?'Výrobok':sg==='MATERIAL'||sg==='POUZITY_MATERIAL'?'Materiál':'Tovar';
     // Hľadaj stav zásob pod rôznymi názvami stĺpcov
-    const stockVal=num(r,['Stav zásob v MJ','stav zásob','stav zasob']);
-    const priceVal=num(r,['Priem. cena','priem cena','priem.cena','priemerna cena']);
-    const nazov=col(r,['Názov','nazov','name'])||'';
-    const mj=col(r,['MJ','merná jednotka','merna'])||'';
+    const stockVal=num(r,['Stav zásob v MJ','Stav zásob v MJ s požiadavkami','Stav zasob v MJ','stav zasob v mj','Stav']);
+    const priceVal=num(r,['Priem. cena','Priem cena','Priemerna cena','priem. cena']);
+    const nazov=col(r,['Názov','Nazov','Name','nazov'])||'';
+    const mj=col(r,['MJ','Merna jednotka','Merná jednotka'])||'';
     sk[sku]={name:nazov,stock:stockVal,price:priceVal,mj,skupina:sg,typ};}
 
   const sal={},invSkipped=[];
@@ -345,7 +363,7 @@ function compute(sklR,pohR,magR,sups,sal2025ext){
     else if(daysLeft<30&&d45>0)status='varovanie';
     else if(d45===0&&s.stock>0)status='nepredava';
     else status='ok';
-    if(!['vypadok','urgentne','kriticke','varovanie'].includes(status))continue;
+    // Zobrazujeme všetky produkty — filter sa aplikuje v getFiltered()
 
     const supI=supMap[(m.sup||'').toLowerCase().trim()]||null;
     const leadDays=(supI?+supI.lead_days:0)||0;
@@ -426,6 +444,10 @@ function getFiltered(){
   else if(S.filter!=='all')p=p.filter(x=>x.status===S.filter);
   if(S.supFil!=='all')p=p.filter(x=>x.dodavatel===S.supFil);
   if(S.typFil!=='all')p=p.filter(x=>x.typ===S.typFil);
+  if(S.objFil!=='all')p=p.filter(x=>x.obj===S.objFil);
+  // Default: ak nie sú zapnuté žiadne špeciálne filtre, ukaž len kritické
+  const hasSpecialFilter=S.filter!=='all'||S.typFil!=='all'||S.objFil!=='all'||S.abcFil!=='all'||S.search;
+  if(!hasSpecialFilter)p=p.filter(x=>['vypadok','urgentne','kriticke','varovanie'].includes(x.status));
   if(S.abcFil!=='all')p=p.filter(x=>x.abc===S.abcFil);
   if(S.search){const q=S.search.toLowerCase();p=p.filter(x=>x.sku.toLowerCase().includes(q)||x.name.toLowerCase().includes(q)||(x.dodavatel||'').toLowerCase().includes(q));}
   return[...p].sort((a,b)=>{const c=S.sortCol;let av=a[c]??99999,bv=b[c]??99999;return typeof av==='string'?S.sortDir*av.localeCompare(bv):S.sortDir*(av-bv);});
@@ -493,11 +515,13 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
   <button class="pill${S.abcFil==='A'?' on':''}" data-abc="A">A</button>
   <button class="pill${S.abcFil==='B'?' on':''}" data-abc="B">B</button>
   <button class="pill${S.abcFil==='C'?' on':''}" data-abc="C">C</button>
+  <span style="font-size:10px;color:#AAA;margin-left:4px">|</span>
+  ${[...new Set(S.products.map(p=>p.obj).filter(Boolean))].sort().map(o=>`<button class="pill${S.objFil===o?' on':''}" data-obj="${esc(o)}">${objBadge(o)}</button>`).join('')}
   <input type="text" id="srch" placeholder="Hľadať kód / názov / dodávateľ..." value="${esc(S.search)}" style="font-size:11px;padding:5px 9px;flex:1;min-width:150px;max-width:260px;">
   ${sups.length?`<select id="supfil" style="font-size:11px;padding:5px 7px;"><option value="all">Všetci dodávatelia</option>${sups.map(s=>`<option value="${esc(s)}"${S.supFil===s?' selected':''}>${esc(s)}</option>`).join('')}</select>`:''}
 </div>
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-  <span style="font-size:10px;color:#AAA">Zobrazených ${Math.min(filtered.length,300)} z ${filtered.length}</span>
+  <span style="font-size:10px;color:#AAA">Zobrazených ${Math.min(filtered.length,500)} z ${filtered.length} (celkom: ${S.products.length}${(!S.filter||S.filter==='all')&&!S.typFil||S.typFil==='all'&&!S.objFil||S.objFil==='all'&&!S.search&&S.abcFil==='all'?' · len kritické':' · filtrované'})</span>
   <div style="display:flex;align-items:center;gap:5px;margin-left:auto;background:#F9F9F9;border:1px solid #E5E5E5;border-radius:6px;padding:3px 9px">
     <span style="font-size:10px;color:#666;font-weight:500">Globálna zásoba:</span>
     ${[0.5,1,1.5,2,3,6].map(m=>`<button class="pill${S.orderMonths===m?' on':''}" data-months="${m}" style="font-size:10px;padding:2px 6px">${m<1?Math.round(m*30)+'d':m+'m'}</button>`).join('')}
@@ -525,7 +549,7 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
   <th>Stav</th>
   <th>Akcia</th>
 </tr></thead>
-<tbody>${filtered.slice(0,300).map(p=>{
+<tbody>${filtered.slice(0,500).map(p=>{
   const ord=isOrd(p.sku);
   const dc=p.status==='vypadok'?'#A32D2D':p.status==='urgentne'?'#7A1C1C':p.status==='kriticke'?'#854F0B':'#27500A';
   const smap={vypadok:['sv','Výpadok'],urgentne:['su','Urgentné'],kriticke:['sk2','Kritické'],varovanie:['sw','Varovanie']};
@@ -725,6 +749,7 @@ function bindAll(){
   qa('[data-tab]').forEach(el=>el.addEventListener('click',()=>{S.tab=el.dataset.tab;S.alert=null;render();}));
   qa('[data-fil]').forEach(el=>el.addEventListener('click',()=>{S.filter=el.dataset.fil;render();}));
   qa('[data-typ]').forEach(el=>el.addEventListener('click',()=>{S.typFil=el.dataset.typ;render();}));
+  qa('[data-obj]').forEach(el=>el.addEventListener('click',()=>{S.objFil=S.objFil===el.dataset.obj?'all':el.dataset.obj;render();}));
   qa('[data-abc]').forEach(el=>el.addEventListener('click',()=>{S.abcFil=S.abcFil===el.dataset.abc?'all':el.dataset.abc;render();}));
   qa('[data-months]').forEach(el=>el.addEventListener('click',()=>{S.orderMonths=+el.dataset.months;render();}));
   qa('[data-sort]').forEach(el=>el.addEventListener('click',()=>{const c=el.dataset.sort;S.sortCol===c?S.sortDir*=-1:(S.sortCol=c,S.sortDir=1);render();}));
