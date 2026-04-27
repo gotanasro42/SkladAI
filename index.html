@@ -241,7 +241,14 @@ function compute(sklR,pohR,magR,sups,pohR2025){
   const sk={};
   for(const r of sklR){const sku=r['Cenník']||'';if(!sku)continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
     const typ=sg==='VYROBOK'?'Výrobok':sg==='MATERIAL'||sg==='POUZITY_MATERIAL'?'Materiál':'Tovar';
-    sk[sku]={name:r['Názov']||'',stock:+r['Stav zásob v MJ']||0,price:+r['Priem. cena']||0,mj:r['MJ']||'',skupina:sg,typ};}
+    // Hľadaj stav zásob pod rôznymi názvami stĺpcov
+    const stockVal=parseFloat(
+      r['Stav zásob v MJ']??
+      r['Stav zásob v MJ s požiadavkami']??
+      r['Stav']??0
+    )||0;
+    const priceVal=parseFloat(r['Priem. cena']??r['Priem cena']??0)||0;
+    sk[sku]={name:r['Názov']||'',stock:stockVal,price:priceVal,mj:r['MJ']||'',skupina:sg,typ};}
 
   const sal={},invSkipped=[];
   for(const r of pohR){
@@ -344,7 +351,10 @@ function orderQtyFor(p,months){
 async function processAll(){
   S.processing=true;S.progress=5;S.pmsg='Načítavam stav skladu...';render();
   try{
-    const sklR=await parseFile(S.files.sklad);S.progress=22;S.pmsg='Načítavam pohyby (20–30 sek)...';render();
+    const sklR=await parseFile(S.files.sklad);
+    // Debug: log prvý riadok stavu skladu do konzoly
+    if(sklR.length>0){console.log('Stav skladu — stĺpce:',Object.keys(sklR[0]));console.log('Prvý produkt:',sklR[0]);}
+    S.progress=22;S.pmsg='Načítavam pohyby (20–30 sek)...';render();
     const pohR=await parseFile(S.files.pohyby);S.progress=55;S.pmsg='Načítavam Magento export...';render();
     const magR=await parseFile(S.files.mag);S.progress=72;
     let pohR2025=null;
