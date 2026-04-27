@@ -191,6 +191,7 @@ const S={
   typFil:'all',        // filter typu produktu
   rowMonths:{},        // per-produkt override: {sku: months}
   has2025:false,       // či máme nahrané hist. pohyby
+  sal2025:{},          // {sku: avgPerDay} — uložené/načítané z DB
 };
 
 // DB operácie
@@ -215,6 +216,12 @@ async function dbLoad(){
       S.lastSync=curRes.data[0].sync_date;
       S.tab='dashboard';
     }
+    // Načítaj pohyby 2025 z DB
+    const hist=await dbLoadHist2025();
+    if(hist&&Object.keys(hist).length>0){
+      S.sal2025=hist;
+      S.has2025=true;
+    }
   }catch(e){console.error(e);S.dbOk=false;S.alert={t:'e',msg:`Chyba DB: ${e.message}`};}
 }
 async function dbSaveSupplier(sup){const{data,error}=await db.from('suppliers').upsert({...sup},{onConflict:'name'}).select();if(error){S.alert={t:'e',msg:'Chyba: '+error.message};return null;}return data?.[0];}
@@ -226,6 +233,22 @@ async function dbDeleteOrder(id){const{error}=await db.from('orders').delete().e
 async function dbSaveSnapshot(snap){await db.from('snapshots').upsert({date:snap.date,stats:snap.stats},{onConflict:'date'});}
 async function dbSaveProducts(d,p){await db.from('current_products').upsert({sync_date:d,products:p},{onConflict:'sync_date'});}
 
+// Uloženie a načítanie pohybov 2025 z Supabase
+async function dbSaveHist2025(sal2025){
+  // Uložíme ako jeden JSON objekt
+  const{error}=await db.from('current_products').upsert(
+    {sync_date:'2025-hist',products:sal2025},
+    {onConflict:'sync_date'}
+  );
+  if(error)console.error('Hist2025 save error:',error);
+  else console.log('Pohyby 2025 uložené do DB');
+}
+async function dbLoadHist2025(){
+  const{data,error}=await db.from('current_products').select('products').eq('sync_date','2025-hist').single();
+  if(error||!data)return null;
+  return data.products; // sal2025 object {sku: avgPerDay}
+}
+
 async function parseFile(file){
   return new Promise((res,rej)=>{
     const r=new FileReader();
@@ -234,59 +257,58 @@ async function parseFile(file){
   });
 }
 
+// Robustné čítanie stĺpca — hľadá podreťazec case-insensitívne
+function col(row,keywords){
+  const keys=Object.keys(row);
+  for(const kw of (Array.isArray(keywords)?keywords:[keywords])){
+    const k=keys.find(k=>k.toLowerCase().replace(/\s+/g,' ').trim().includes(kw.toLowerCase()));
+    if(k!==undefined&&row[k]!==''&&row[k]!==null&&row[k]!==undefined)return row[k];
+  }
+  return undefined;
+}
+function num(row,keywords){return parseFloat(col(row,keywords))||0;}
+
 // Hlavný výpočet
 // Vylúčenie inventúry: vydej BEZ Činnosti = inventúrny pohyb (overené na 100% vzorke)
-function compute(sklR,pohR,magR,sups,pohR2025){
+function compute(sklR,pohR,magR,sups,sal2025ext){
   const now=Date.now(),ms14=now-14*864e5,ms45=now-45*864e5,ms90=now-90*864e5;
   const sk={};
-  for(const r of sklR){const sku=r['Cenník']||'';if(!sku)continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
+  for(const r of sklR){const sku=col(r,['Cenník','cennik','Cennk'])||'';if(!sku)continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
     const typ=sg==='VYROBOK'?'Výrobok':sg==='MATERIAL'||sg==='POUZITY_MATERIAL'?'Materiál':'Tovar';
     // Hľadaj stav zásob pod rôznymi názvami stĺpcov
-    const stockVal=parseFloat(
-      r['Stav zásob v MJ']??
-      r['Stav zásob v MJ s požiadavkami']??
-      r['Stav']??0
-    )||0;
-    const priceVal=parseFloat(r['Priem. cena']??r['Priem cena']??0)||0;
-    sk[sku]={name:r['Názov']||'',stock:stockVal,price:priceVal,mj:r['MJ']||'',skupina:sg,typ};}
+    const stockVal=num(r,['Stav zásob v MJ','stav zásob','stav zasob']);
+    const priceVal=num(r,['Priem. cena','priem cena','priem.cena','priemerna cena']);
+    const nazov=col(r,['Názov','nazov','name'])||'';
+    const mj=col(r,['MJ','merná jednotka','merna'])||'';
+    sk[sku]={name:nazov,stock:stockVal,price:priceVal,mj,skupina:sg,typ};}
 
   const sal={},invSkipped=[];
   for(const r of pohR){
-    if(!(r['Typ pohybu']||'').includes('vydej'))continue;
-    const cinnost=(r['Činnosť']||'').toString().trim();
+    const typPoh=(col(r,['Typ pohybu','typ pohybu'])||'').toString();
+    if(!typPoh.includes('vydej'))continue;
+    const cinnost=(col(r,['Činnosť','cinnost','Cinnost'])||'').toString().trim();
     if(!cinnost){invSkipped.push(r);continue;}
-    const sku=r['Kód z cenníka']||'';if(!sku)continue;
-    const qty=+r['Množstvo']||0,val=+r['Celkom [€]']||0;
-    const ds=r['Dátum vyst.'];const dt=ds instanceof Date?ds.getTime():new Date(ds).getTime();
+    const sku=col(r,['Kód z cenníka','kod z cennika','cennik'])||'';if(!sku)continue;
+    const qty=num(r,['Množstvo','mnozstvo']),val=num(r,['Celkom','celkom']);
+    const dsRaw=col(r,['Dátum vyst','datum vyst','Dátum']);
+    const ds=dsRaw instanceof Date?dsRaw:dsRaw;const dt=ds instanceof Date?ds.getTime():new Date(ds).getTime();
     if(!sal[sku])sal[sku]={q14:0,q45:0,q90:0,v14:0,v45:0,v90:0};
     if(dt>=ms14){sal[sku].q14+=qty;sal[sku].v14+=val;}
     if(dt>=ms45){sal[sku].q45+=qty;sal[sku].v45+=val;}
     if(dt>=ms90){sal[sku].q90+=qty;sal[sku].v90+=val;}
   }
 
-  // Minuloročné dáta — rovnaké obdobie (±15 dní od dnešného dňa vlani)
-  const sal2025={};
-  if(pohR2025&&pohR2025.length>0){
-    const yr=new Date();yr.setFullYear(yr.getFullYear()-1);
-    const lo=yr.getTime()-15*864e5,hi=yr.getTime()+15*864e5;
-    const days30=30;
-    for(const r of pohR2025){
-      if(!(r['Typ pohybu']||'').includes('vydej'))continue;
-      if(!(r['Činnosť']||'').toString().trim())continue;
-      const ds=r['Dátum vyst.'];const dt=ds instanceof Date?ds.getTime():new Date(ds).getTime();
-      if(dt<lo||dt>hi)continue;
-      const sku=r['Kód z cenníka']||'';if(!sku)continue;
-      const qty=+r['Množstvo']||0;
-      if(!sal2025[sku])sal2025[sku]=0;
-      sal2025[sku]+=qty;
-    }
-    // Normalizuj na deň
-    for(const sku of Object.keys(sal2025))sal2025[sku]=+(sal2025[sku]/days30).toFixed(2);
-  }
+  // Minuloročné dáta — používame predpočítaný objekt (z DB alebo čerstvo spracovaný)
+  const sal2025=sal2025ext||{};
 
   const mag={};
-  for(const r of magR){const sku=r['SKU']||'';if(!sku)continue;const magTyp=(r['Typ produktu']||r['Typ']||'').toString().trim();
-    mag[sku]={obj:r['Objednanie']||'',sup:resolveSupplier((r['Dodávateľ']||r['Dodavatel']||'').trim()),email:r['Email']||'',magTyp};}
+  for(const r of magR){
+    const sku=col(r,['SKU','sku'])||'';if(!sku)continue;
+    const magTyp=(col(r,['Typ produktu','typ produktu','Typ'])||'').toString().trim();
+    const obj=col(r,['Objednanie','objednanie'])||'';
+    const sup=resolveSupplier((col(r,['Dodávateľ','Dodavatel','dodavatel'])||'').trim());
+    const email=col(r,['Email','email'])||'';
+    mag[sku]={obj,sup,email,magTyp};}
   const supMap={};for(const s of sups)supMap[(s.name||'').toLowerCase().trim()]=s;
 
   // ABC klasifikácia — zorad podľa v45, top 20% = A, 50% = B, zvyšok = C
@@ -357,10 +379,34 @@ async function processAll(){
     S.progress=22;S.pmsg='Načítavam pohyby (20–30 sek)...';render();
     const pohR=await parseFile(S.files.pohyby);S.progress=55;S.pmsg='Načítavam Magento export...';render();
     const magR=await parseFile(S.files.mag);S.progress=72;
-    let pohR2025=null;
-    if(S.files.hist){S.pmsg='Načítavam hist. pohyby 2025...';render();pohR2025=await parseFile(S.files.hist);S.has2025=true;}
+    // Pohyby 2025 — spracuj ak nahrané, inak použi uložené v DB
+    let sal2025=S.sal2025||{};
+    if(S.files.hist){
+      S.pmsg='Načítavam pohyby 2025 a ukladám do DB...';render();
+      const pohR2025=await parseFile(S.files.hist);
+      // Vypočítaj sal2025 objekt
+      const yr=new Date();yr.setFullYear(yr.getFullYear()-1);
+      const lo=yr.getTime()-15*864e5,hi=yr.getTime()+15*864e5;
+      const sal2025new={};
+      for(const r of pohR2025){
+        if(!(col(r,['Typ pohybu'])||'').includes('vydej'))continue;
+        if(!(col(r,['Činnosť','cinnost'])||'').toString().trim())continue;
+        const dsRaw2=col(r,['Dátum vyst','datum']);
+        const dt=dsRaw2 instanceof Date?dsRaw2.getTime():new Date(dsRaw2).getTime();
+        if(dt<lo||dt>hi)continue;
+        const sku=col(r,['Kód z cenníka','cennik'])||'';if(!sku)continue;
+        const qty=num(r,['Množstvo','mnozstvo']);
+        if(!sal2025new[sku])sal2025new[sku]=0;
+        sal2025new[sku]+=qty;
+      }
+      for(const sku of Object.keys(sal2025new))sal2025new[sku]=+(sal2025new[sku]/30).toFixed(2);
+      sal2025=sal2025new;
+      S.sal2025=sal2025;
+      S.has2025=true;
+      await dbSaveHist2025(sal2025);
+    }
     S.pmsg='Vyhodnocujem...';render();
-    const{products,invSkipped}=compute(sklR,pohR,magR,S.suppliers,pohR2025);
+    const{products,invSkipped}=compute(sklR,pohR,magR,S.suppliers,sal2025);
     S.progress=88;S.pmsg='Ukladám do databázy...';render();
     const date=today();
     const stats={vypadok:products.filter(p=>p.status==='vypadok').length,urgentne:products.filter(p=>p.status==='urgentne').length,kriticke:products.filter(p=>p.status==='kriticke').length,varovanie:products.filter(p=>p.status==='varovanie').length,neskoro:products.filter(p=>p.toolate).length};
@@ -423,7 +469,7 @@ function dashHtml(c){
   <div style="background:#E1F5EE;border:1px solid #5DCAA5;border-radius:7px;padding:8px 11px;font-size:11px;color:#085041"><div style="font-weight:600;margin-bottom:2px">✅ Sezónnosť 2025</div>Zabudovaná — 313 902 pohybov. Koef. ${sfPct>0?'+':''}${sfPct}% pre ${globalDays} dní.</div>
   <div style="background:#E1F5EE;border:1px solid #5DCAA5;border-radius:7px;padding:8px 11px;font-size:11px;color:#085041"><div style="font-weight:600;margin-bottom:2px">✅ Inventúrne pohyby</div>Auto vylúčené — vydej bez Činnosti (krajiny) = inventúra.</div>
   <div style="background:${S.dbOk?'#E1F5EE':'#FDEAEA'};border:1px solid ${S.dbOk?'#5DCAA5':'#F09595'};border-radius:7px;padding:8px 11px;font-size:11px;color:${S.dbOk?'#085041':'#7A1C1C'}"><div style="font-weight:600;margin-bottom:2px">${S.dbOk?'✅':'❌'} Databáza</div>${S.dbOk?`História: ${S.snapshots.length} dní · Dodávatelia: ${S.suppliers.length}`:'Odpojená'}</div>
-  <div style="background:${S.has2025?'#E1F5EE':'#F9F9F9'};border:1px solid ${S.has2025?'#5DCAA5':'#E5E5E5'};border-radius:7px;padding:8px 11px;font-size:11px;color:${S.has2025?'#085041':'#888'}"><div style="font-weight:600;margin-bottom:2px">${S.has2025?'✅':'⬜'} Pohyby 2025</div>${S.has2025?'Nahrané — zobrazuje sa dňový priemer rovn. obdobia vlani.':'Nenahrané — nahraj v Nahrať dáta (4. slot).'}</div>
+  <div style="background:${S.has2025?'#E1F5EE':'#F9F9F9'};border:1px solid ${S.has2025?'#5DCAA5':'#E5E5E5'};border-radius:7px;padding:8px 11px;font-size:11px;color:${S.has2025?'#085041':'#888'}"><div style="font-weight:600;margin-bottom:2px">${S.has2025?'✅':'⬜'} Pohyby 2025</div>${S.has2025?`Aktívne — ${Object.keys(S.sal2025).length.toLocaleString()} produktov. Uložené v DB, načítava sa automaticky.`:'Nenahrané — nahraj raz v záložke Nahrať dáta (4. slot).'}</div>
 </div>`;
 
   return `${cp?cpHtml(cp):''}${statusPanel}
@@ -558,7 +604,7 @@ function uploadHtml(){
   ${dz('sklad','1. Stav skladu','FlexiBee — každý deň',f.sklad,false)}
   ${dz('pohyby','2. Pohyby skladu','FlexiBee — posl. 90 dní',f.pohyby,false)}
   ${dz('mag','3. Magento export','SKU + Objednanie + Dodávateľ',f.mag,false)}
-  ${dz('hist','4. Pohyby 2025 (vol.)','FlexiBee — celý rok 2025',f.hist,true)}
+  ${dz('hist',S.has2025?'4. Pohyby 2025 (aktualizovať)':'4. Pohyby 2025 (nahraj raz)','FlexiBee — celý rok 2025 — uloží sa do DB',f.hist,true)}
 </div>
 ${S.processing?`<div style="font-size:12px;color:#666;margin-bottom:5px">${S.pmsg}</div><div class="pw"><div class="pb" style="width:${S.progress}%"></div></div>`:`<button class="pbtn" id="proc-btn" ${(!f.sklad||!f.pohyby||!f.mag)?'disabled':''}>Spracovať a uložiť do databázy</button>`}
 </div>
