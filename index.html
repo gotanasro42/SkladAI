@@ -644,15 +644,33 @@ ${p.toolate?`<div style="font-size:11px;color:#854F0B;margin-bottom:7px;padding:
 
 function uploadHtml(){
   const f=S.files;
+  const anySkl=f.tovar||f.vyrobok||f.material;
   return `<div class="panel">
 <div class="ptitle">Nahrať súbory — denná aktualizácia</div>
-<div class="ugrid">
-  ${dz('sklad','1. Stav skladu','FlexiBee — každý deň',f.sklad,false)}
-  ${dz('pohyby','2. Pohyby skladu','FlexiBee — posl. 90 dní',f.pohyby,false)}
-  ${dz('mag','3. Magento export','SKU + Objednanie + Dodávateľ',f.mag,false)}
-  ${dz('hist',S.has2025?'4. Pohyby 2025 (aktualizovať)':'4. Pohyby 2025 (nahraj raz)','FlexiBee — celý rok 2025 — uloží sa do DB',f.hist,true)}
+
+<div style="font-size:11px;font-weight:600;color:#1A1A1A;margin-bottom:6px">
+  Krok 1 — Stav skladu
+  <span style="font-size:10px;font-weight:400;color:#888;margin-left:6px">Exportuj zvlášť podľa typu: FlexiBee → Stav skladu k dátumu → filter Skupina tovarov</span>
 </div>
-${S.processing?`<div style="font-size:12px;color:#666;margin-bottom:5px">${S.pmsg}</div><div class="pw"><div class="pb" style="width:${S.progress}%"></div></div>`:`<button class="pbtn" id="proc-btn" ${((!f.tovar&&!f.vyrobok&&!f.material)||!f.pohyby||!f.mag)?'disabled':''}>Spracovať a uložiť do databázy</button>`}
+<div class="ugrid" style="margin-bottom:1rem">
+  ${dz('tovar',   '📦 Tovar',   'Skupina tovarov = TOVAR',    f.tovar,   false)}
+  ${dz('vyrobok', '🔧 Výrobok', 'Skupina tovarov = VYROBOK',  f.vyrobok, false)}
+  ${dz('material','🧵 Materiál','Skupina tovarov = MATERIAL', f.material,false)}
+</div>
+
+<div style="font-size:11px;font-weight:600;color:#1A1A1A;margin-bottom:6px">
+  Krok 2 — Pohyby a Magento
+</div>
+<div class="ugrid">
+  ${dz('pohyby','Pohyby skladu (90 dní)','FlexiBee → Pohyby → filter 90 dní',f.pohyby,false)}
+  ${dz('mag','Magento export','SKU + Objednanie + Dodávateľ',f.mag,false)}
+  ${dz('hist',S.has2025?'Pohyby 2025 (aktualizovať)':'Pohyby 2025 (nahraj raz)','Celý rok 2025 — uloží sa do DB',f.hist,true)}
+</div>
+
+${!anySkl&&!S.processing?`<div class="al al-w" style="margin-top:8px">Nahraj aspoň jeden súbor stavu skladu (Tovar, Výrobok alebo Materiál).</div>`:''}
+${S.processing
+  ?`<div style="font-size:12px;color:#666;margin-bottom:5px;margin-top:10px">${S.pmsg}</div><div class="pw"><div class="pb" style="width:${S.progress}%"></div></div>`
+  :`<button class="pbtn" id="proc-btn" style="margin-top:10px" ${(!anySkl||!f.pohyby||!f.mag)?'disabled':''}>Spracovať a uložiť do databázy</button>`}
 </div>
 <div class="panel">
 <div class="ptitle">Čo musia súbory obsahovať</div>
