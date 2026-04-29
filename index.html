@@ -310,7 +310,7 @@ function num(row,candidates){const v=col(row,candidates);return v===undefined||v
 function compute(sklR,pohR,magR,sups,sal2025ext){
   const now=Date.now(),ms14=now-14*864e5,ms45=now-45*864e5,ms90=now-90*864e5;
   const sk={};
-  for(const r of sklR){const sku=col(r,['Cenník','cennik','Cennk'])||'';if(!sku)continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
+  for(const r of sklR){const sku=col(r,['Cenník','cennik','Cennk'])||'';if(!sku||isIgnored(sku))continue;const sg=(r['Skupina tovarov']||'').toString().trim().toUpperCase();
     const typ=sg==='VYROBOK'?'Výrobok':sg==='MATERIAL'||sg==='POUZITY_MATERIAL'?'Materiál':'Tovar';
     // Hľadaj stav zásob pod rôznymi názvami stĺpcov
     const stockVal=num(r,['Stav zásob v MJ','Stav zásob v MJ s požiadavkami','Stav zasob v MJ','stav zasob v mj','Stav']);
@@ -325,7 +325,7 @@ function compute(sklR,pohR,magR,sups,sal2025ext){
     if(!typPoh.includes('vydej'))continue;
     const cinnost=(col(r,['Činnosť','cinnost','Cinnost'])||'').toString().trim();
     if(!cinnost){invSkipped.push(r);continue;}
-    const sku=col(r,['Kód z cenníka','kod z cennika','cennik'])||'';if(!sku)continue;
+    const sku=col(r,['Kód z cenníka','kod z cennika','cennik'])||'';if(!sku||isIgnored(sku))continue;
     const qty=num(r,['Množstvo','mnozstvo']),val=num(r,['Celkom','celkom']);
     const dsRaw=col(r,['Dátum vyst','datum vyst','Dátum']);
     const ds=dsRaw instanceof Date?dsRaw:dsRaw;const dt=ds instanceof Date?ds.getTime():new Date(ds).getTime();
@@ -448,7 +448,7 @@ async function processAll(){
         const dsRaw2=col(r,['Dátum vyst','datum']);
         const dt=dsRaw2 instanceof Date?dsRaw2.getTime():new Date(dsRaw2).getTime();
         if(dt<lo||dt>hi)continue;
-        const sku=col(r,['Kód z cenníka','cennik'])||'';if(!sku)continue;
+        const sku=col(r,['Kód z cenníka','cennik'])||'';if(!sku||isIgnored(sku))continue;
         const qty=num(r,['Množstvo','mnozstvo']);
         if(!sal2025new[sku])sal2025new[sku]=0;
         sal2025new[sku]+=qty;
@@ -475,7 +475,7 @@ async function processAll(){
 }
 
 function getFiltered(){
-  let p=S.products;
+  let p=S.products.filter(x=>!isIgnored(x.sku));
   // Ak nie je aktívny žiadny filter okrem "všetky" — ukaž len kritické (default)
   const anyFilterActive=S.filter!=='all'||S.typFil!=='all'||S.objFil!=='all'||S.abcFil!=='all'||!!S.search||S.supFil!=='all';
   if(!anyFilterActive){
