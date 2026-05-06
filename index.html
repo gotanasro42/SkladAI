@@ -317,6 +317,7 @@ function compute(sklR,pohR,magR,sups,sal2025ext){
     const priceVal=num(r,['Priem. cena','Priem cena','Priemerna cena','priem. cena']);
     const nazov=col(r,['Názov','Nazov','Name','nazov'])||'';
     const mj=col(r,['MJ','Merna jednotka','Merná jednotka'])||'';
+    const skuKey=sku+'|'+typ;
     sk[skuKey]={sku,name:nazov,stock:stockVal,price:priceVal,mj,skupina:sg,typ};}
 
   const sal={},invSkipped=[];
