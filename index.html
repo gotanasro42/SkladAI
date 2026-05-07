@@ -276,7 +276,27 @@ async function dbLoadHist2025(){
 async function parseFile(file){
   return new Promise((res,rej)=>{
     const r=new FileReader();
-    r.onload=e=>{try{const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});const ws=wb.Sheets[wb.SheetNames[0]];res(XLSX.utils.sheet_to_json(ws,{raw:false,defval:''}));}catch(err){rej(err);}};
+    r.onload=e=>{
+      try{
+        const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        let rows=XLSX.utils.sheet_to_json(ws,{raw:false,defval:''});
+        if(rows.length>0){
+          const firstKeys=Object.keys(rows[0]).join('|').toLowerCase();
+          const hasRealHeaders=
+            firstKeys.includes('cenník')||firstKeys.includes('cennik')||
+            firstKeys.includes('sku')||firstKeys.includes('typ pohybu')||
+            firstKeys.includes('dátum')||firstKeys.includes('datum')||
+            firstKeys.includes('názov')||firstKeys.includes('nazov');
+          if(!hasRealHeaders){
+            console.log('Preskakujem titulný riadok, klúče:',Object.keys(rows[0]).slice(0,4).join(', '));
+            rows=XLSX.utils.sheet_to_json(ws,{raw:false,defval:'',range:1});
+          }
+        }
+        console.log('Súbor:',file.name,'| r.',rows.length,'| stĺpce:',Object.keys(rows[0]||{}).slice(0,6).join(', '));
+        res(rows);
+      }catch(err){rej(err);}
+    };
     r.onerror=rej;r.readAsArrayBuffer(file);
   });
 }
@@ -477,21 +497,26 @@ async function processAll(){
 
 function getFiltered(){
   let p=S.products.filter(x=>!isIgnored(x.sku));
-  // Ak nie je aktívny žiadny filter okrem "všetky" — ukaž len kritické (default)
-  const anyFilterActive=S.filter!=='all'||S.typFil!=='all'||S.objFil!=='all'||S.abcFil!=='all'||!!S.search||S.supFil!=='all';
-  if(!anyFilterActive){
-    p=p.filter(x=>['vypadok','urgentne','kriticke','varovanie'].includes(x.status));
-  } else {
-    // Aplikuj vybrané filtre
-    if(S.filter==='neskoro') p=p.filter(x=>x.toolate);
-    else if(S.filter!=='all') p=p.filter(x=>x.status===S.filter);
-    if(S.typFil!=='all')  p=p.filter(x=>(x.typ||'Tovar')===S.typFil);
-    if(S.objFil!=='all')  p=p.filter(x=>x.obj===S.objFil);
-    if(S.abcFil!=='all')  p=p.filter(x=>x.abc===S.abcFil);
-    if(S.supFil!=='all')  p=p.filter(x=>x.dodavatel===S.supFil);
-    if(S.search){const q=S.search.toLowerCase();p=p.filter(x=>x.sku.toLowerCase().includes(q)||x.name.toLowerCase().includes(q)||(x.dodavatel||'').toLowerCase().includes(q));}
-  }
-  return[...p].sort((a,b)=>{const col=S.sortCol;let av=a[col]??99999,bv=b[col]??99999;return typeof av==='string'?S.sortDir*av.localeCompare(bv):S.sortDir*(av-bv);});
+  // Filtre — zobrazujú sa všetky produkty, kritické sú vždy navrchu
+  if(S.filter==='neskoro') p=p.filter(x=>x.toolate);
+  else if(S.filter!=='all') p=p.filter(x=>x.status===S.filter);
+  if(S.typFil!=='all')  p=p.filter(x=>(x.typ||'Tovar')===S.typFil);
+  if(S.objFil!=='all')  p=p.filter(x=>x.obj===S.objFil);
+  if(S.abcFil!=='all')  p=p.filter(x=>x.abc===S.abcFil);
+  if(S.supFil!=='all')  p=p.filter(x=>x.dodavatel===S.supFil);
+  if(S.search){const q=S.search.toLowerCase();p=p.filter(x=>x.sku.toLowerCase().includes(q)||x.name.toLowerCase().includes(q)||(x.dodavatel||'').toLowerCase().includes(q));}
+  const statusOrder={vypadok:0,urgentne:1,kriticke:2,varovanie:3,nepredava:4,ok:5};
+  return[...p].sort((a,b)=>{
+    if(S.sortCol==='daysLeft'){
+      const so=(statusOrder[a.status]??9)-(statusOrder[b.status]??9);
+      if(so!==0)return so;
+      let av=a.daysLeft??99999,bv=b.daysLeft??99999;
+      return av-bv;
+    }
+    const col2=S.sortCol;
+    let av=a[col2]??99999,bv=b[col2]??99999;
+    return typeof av==='string'?S.sortDir*av.localeCompare(bv):S.sortDir*(av-bv);
+  });
 }
 function isOrd(sku){return S.ordered.some(o=>o.sku===sku&&!o.arrived);}
 function render(keepFocus){
@@ -596,7 +621,7 @@ ${sm?`<div class="al" style="background:${sm.bg};color:${sm.color};border:1px so
 </div>
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-    <span style="font-size:10px;color:#AAA">Celkom: ${filtered.length} produktov (${S.products.length} v DB)${S.typFil!=='all'||S.objFil!=='all'||S.filter!=='all'||S.search?' · filtrované':' · len kritické'}</span>
+    <span style="font-size:10px;color:#AAA">Celkom: ${filtered.length} produktov (${S.products.length} v DB)${S.typFil!=='all'||S.objFil!=='all'||S.filter!=='all'||S.search?' · filtrované':''}</span>
     ${filtered.length>50?`<div style="display:flex;align-items:center;gap:4px;margin-left:auto">
       <button id="pg-prev" class="dbtn" ${S.page===0?'disabled':''}>← Predch.</button>
       <span style="font-size:11px;font-weight:500;padding:0 6px">${S.page+1} / ${Math.ceil(filtered.length/50)}</span>
